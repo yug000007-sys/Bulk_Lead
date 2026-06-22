@@ -165,19 +165,21 @@ else:
         st.dataframe(pd.DataFrame([rec["row"] for rec in batch])[core.EXCEL_HEADER],
                      use_container_width=True)
 
-    # ── attachments (read-only preview in Stage 1) ──────────────────────────────
+    # ── attachments: select → confirm (1) or order+merge (2+) → one PDF ─────────
     if n_with_att:
-        st.markdown("#### 📎 Attachments")
-        st.caption("Kept attachments per lead (signatures/logos already filtered out). "
-                   "In Stage 2 you'll select, name and merge these into one PDF.")
+        st.markdown("#### 📎 Attachments → PDF")
+        st.caption("Tick the valid files for each lead. One file → Confirm (renamed to a unique PDF). "
+                   "Two or more → set order and Merge into one PDF. The name goes into the PDF column.")
         for i, rec in enumerate(batch):
             atts = rec["attachments"]
             if not atts:
                 continue
             label = rec["row"].get("Company") or rec["row"].get("LastName") or rec.get("source_file") or f"record {i}"
-            with st.expander(f"📎 [{i}] {label} — {len(atts)} attachment(s)"):
+            done = rec["row"].get("PDF", "")
+            head = f"📎 [{i}] {label} — {len(atts)} attachment(s)" + (f"  ✅ {done}" if done else "")
+            with st.expander(head):
+                # thumbnails for quick validity check
                 images = [(n, d) for n, d in atts if Path(n).suffix.lower() in core.IMAGE_EXTS]
-                docs = [(n, d) for n, d in atts if Path(n).suffix.lower() not in core.IMAGE_EXTS]
                 if images:
                     cols = st.columns(min(4, len(images)))
                     for j, (n, d) in enumerate(images):
@@ -186,8 +188,80 @@ else:
                                 st.image(d, caption=n, width=140)
                             except Exception:
                                 st.caption(n)
-                for n, d in docs:
-                    st.markdown(f"📄 **{n}** ({len(d)//1024} KB)")
+
+                # selection / ordering grid (only PDF + image files can become a PDF)
+                pdfable = [(n, d) for n, d in atts if Path(n).suffix.lower() in core.MERGEABLE_EXTS]
+                other = [(n, d) for n, d in atts if Path(n).suffix.lower() not in core.MERGEABLE_EXTS]
+                if other:
+                    st.caption("Can't go into a PDF (kept in the email, not the merged file): "
+                               + ", ".join(n for n, _ in other))
+
+                if not pdfable:
+                    st.caption("No PDF/image attachments to turn into a PDF for this lead.")
+                    continue
+
+                sel_df = pd.DataFrame([{"include": True, "order": k + 1, "file": n}
+                                       for k, (n, _) in enumerate(pdfable)])
+                sel = st.data_editor(
+                    sel_df, hide_index=True, use_container_width=True, key=f"sel_{i}",
+                    column_config={
+                        "include": st.column_config.CheckboxColumn("Use"),
+                        "order": st.column_config.NumberColumn("Order", min_value=1, step=1),
+                        "file": st.column_config.TextColumn("File", disabled=True),
+                    })
+                chosen = sel[sel["include"] == True].sort_values("order")  # noqa: E712
+                by_name = {n: d for n, d in pdfable}
+                items = [(r["file"], by_name[r["file"]]) for _, r in chosen.iterrows()]
+
+                btn_label = "✅ Confirm (1 file → PDF)" if len(items) == 1 else f"🔗 Merge {len(items)} files → PDF"
+                if st.button(btn_label, key=f"make_{i}", disabled=len(items) == 0):
+                    company = rec["row"].get("Company", "")
+                    date_str = rec["row"].get("ReceivedDateTime", "")
+                    if len(items) == 1:
+                        pdf = core.single_to_pdf(items[0][0], items[0][1])
+                    else:
+                        pdf = core.merge_to_pdf(items)
+                    if pdf:
+                        name = core.unique_pdf_name(company, date_str)
+                        rec["row"]["PDF"] = name
+                        rec["pdf_bytes"] = pdf
+                        st.success(f"Created **{name}** ({len(items)} file(s)). Added to the export package.")
+                        st.rerun()
+                    else:
+                        st.error("Could not build a PDF from the selected file(s).")
+
+                if done:
+                    cdl, ccl = st.columns([1, 1])
+                    cdl.download_button("📄 Download this PDF", data=rec.get("pdf_bytes", b""),
+                                        file_name=done, mime="application/pdf", key=f"dl_{i}")
+                    if ccl.button("↩️ Undo / redo selection", key=f"undo_{i}"):
+                        rec["row"]["PDF"] = ""
+                        rec.pop("pdf_bytes", None)
+                        st.rerun()
+
+    # ── export: Excel + all produced PDFs as one ZIP ────────────────────────────
+    st.divider()
+    st.markdown("#### Export")
+    made = {rec["row"]["PDF"]: rec["pdf_bytes"]
+            for rec in batch if rec.get("pdf_bytes") and rec["row"].get("PDF")}
+    pending = [i for i, rec in enumerate(batch) if rec["attachments"] and not rec["row"].get("PDF")]
+    if pending:
+        st.warning(f"{len(pending)} lead(s) have attachments not yet turned into a PDF "
+                   f"(records: {', '.join(map(str, pending))}). Their PDF column will be blank.")
+    st.caption(f"Package will contain leads.xlsx + {len(made)} PDF(s).")
+
+    x1, x2 = st.columns([2, 1])
+    with x1:
+        st.download_button(
+            "📦 Download package (ZIP: Excel + PDFs)", type="primary",
+            data=core.build_zip([rec["row"] for rec in batch], made),
+            file_name="leads_package.zip", mime="application/zip")
+    with x2:
+        st.download_button(
+            "📥 Excel only",
+            data=core.make_excel([rec["row"] for rec in batch]),
+            file_name="leads.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     st.divider()
     c1, c2 = st.columns([1, 1])
@@ -202,6 +276,3 @@ else:
         if st.button("Clear all"):
             st.session_state.batch = []
             st.rerun()
-
-    st.info("Excel / ZIP export and attachment select+merge arrive in **Stage 2**, "
-            "once you've confirmed extraction looks right here.")

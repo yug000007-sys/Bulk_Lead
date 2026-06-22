@@ -10,7 +10,7 @@ a quote, or the internal people who forwarded it) and who the actual lead is (th
 requesting a price/part/info), using cues like an `[EXTERNAL]` banner, a forwarded-message
 divider, or a direct sender.
 
-## Stage 1 (this version)
+## Features
 - Upload `.msg` files, one or many at once.
 - Extraction of name, title, email, company, address, phone, product, quantity, request and summary.
 - Dashboard: completeness metrics, editable grid, manual Lead Source 1/2/3, an
@@ -19,10 +19,12 @@ divider, or a direct sender.
 - Attachment filter keeps real drawings / datasheets / nameplate photos even with messy
   filenames (`IMG_4821.jpg`, `Scan.pdf`), and rejects signature/logo/Outlook icons.
 
-## Stage 2 (next)
-- Per-lead: select which attachments are valid, then **confirm** (single) or **order + merge**
-  (two or more) into one **uniquely-named PDF**; the name goes into the `PDF` column.
-- Export a single **ZIP** containing `leads.xlsx` plus all the PDFs (you upload them to your FTP).
+- Per lead, in the Attachments panel: **tick the valid files**, then **Confirm** (one file →
+  renamed to a unique PDF, image wrapped to one page, existing PDF kept losslessly) or
+  **set order + Merge** (two or more → one PDF). The unique name is written into the `PDF` column.
+- **Download package**: one ZIP containing `leads.xlsx` plus every produced PDF, with filenames
+  matching the `PDF` column. Upload its contents to your FTP yourself.
+- Unique PDF names are collision-proof: `lead_<company>_<YYYYMMDD>_<HHMMSS>_<random>.pdf`.
 
 ## Files
 - `app.py` — Streamlit UI (upload → dashboard)

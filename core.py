@@ -206,12 +206,64 @@ def merge_to_pdf(items: List[Tuple[str, bytes]]) -> bytes | None:
     return out.getvalue()
 
 
-def make_pdf_name(date_str: str = "") -> str:
-    """hydac<M><DD><YYYY><HH><MM>.pdf from a date string, or now() fallback."""
-    m = re.search(r"(\d{4})-(\d{2})-(\d{2})[\sT](\d{2}):(\d{2})", date_str or "")
-    if m:
-        year, month, day, hour, minute = m.groups()
-        return f"hydac{int(month)}{day}{year}{hour}{minute}.pdf"
+def _slug(text: str, maxlen: int = 24) -> str:
+    """Lowercase, alphanumeric+underscore slug of a company/name for readability."""
+    s = re.sub(r"[^a-z0-9]+", "_", str(text or "").lower()).strip("_")
+    return s[:maxlen] or "lead"
+
+
+_ISSUED_NAMES: set = set()
+
+
+def unique_pdf_name(company: str = "", date_str: str = "") -> str:
+    """Collision-proof PDF name: lead_<slug>_<YYYYMMDD>_<HHMMSS>_<rand>.pdf
+
+    Uses a timestamp plus a random suffix, and also remembers every name handed
+    out this session, regenerating on the rare clash — so no two files ever
+    share a name, even within the same second or across repeated batches.
+    """
     import time
-    t = time.localtime()
-    return f"hydac{t.tm_mon}{t.tm_mday:02d}{t.tm_year}{t.tm_hour:02d}{t.tm_min:02d}.pdf"
+    import uuid
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})[\sT](\d{2}):(\d{2}):?(\d{2})?", date_str or "")
+    if m:
+        y, mo, d, h, mi, s = m.groups()
+        stamp = f"{y}{mo}{d}_{h}{mi}{s or '00'}"
+    else:
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+    while True:
+        rand = uuid.uuid4().hex[:8]
+        name = f"lead_{_slug(company)}_{stamp}_{rand}.pdf"
+        if name not in _ISSUED_NAMES:
+            _ISSUED_NAMES.add(name)
+            return name
+
+
+def single_to_pdf(filename: str, data: bytes) -> bytes | None:
+    """Turn ONE selected attachment into PDF bytes.
+
+    - an existing PDF is returned unchanged (lossless rename only)
+    - an image is wrapped into a one-page PDF
+    Returns None if it cannot be converted (e.g. a .dwg/.step that isn't a PDF/image).
+    """
+    ext = Path(filename).suffix.lower()
+    if ext == ".pdf":
+        return data
+    if ext in IMAGE_EXTS:
+        return _image_to_pdf_bytes(data)
+    return None
+
+
+def build_zip(rows: List[Dict], pdfs: Dict[str, bytes], excel_name: str = "leads.xlsx") -> bytes:
+    """Bundle the Excel plus every produced PDF into one ZIP.
+
+    rows  : list of full 54-key rows (already carrying their PDF column names)
+    pdfs  : mapping of {pdf_filename: pdf_bytes} to include alongside the Excel
+    """
+    import zipfile
+    out = BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(excel_name, make_excel(rows))
+        for name, data in pdfs.items():
+            if name and data:
+                z.writestr(name, data)
+    return out.getvalue()
