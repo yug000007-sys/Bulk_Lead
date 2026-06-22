@@ -1,0 +1,8 @@
+streamlit
+openpyxl
+pandas
+Pillow
+pypdf
+beautifulsoup4
+extract-msg
+openai
