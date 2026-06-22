@@ -1,11 +1,9 @@
 """
-email_extract.py — OPTIONAL .msg extraction for bulk upload.
+email_extract.py — universal lead extraction from .msg files.
 
-This is the only part of the formatter that can use an AI provider. It is fully
-optional: if extract-msg or an API key is missing, the rest of the app still
-works (manual entry, CSV bulk, dashboard, Excel export, PDF/image merge).
-
-Ported and trimmed from the original HYDAC Lead Agent.
+Company-agnostic: there is no fixed "internal" company. The agent reads the
+thread itself to tell the requesting customer (the lead) apart from the vendor
+being asked for a quote and any internal forwarders.
 """
 
 from __future__ import annotations
@@ -19,22 +17,55 @@ from typing import Dict, List
 from bs4 import BeautifulSoup
 
 # ── attachment filtering ───────────────────────────────────────────────────────
-SIGNATURE_IMAGE_NAMES = {
-    "image.png", "image.jpg", "image.jpeg", "image.gif",
-    "logo.png", "logo.jpg", "logo.jpeg", "banner.png", "banner.jpg", "banner.jpeg",
-    "facebook.png", "linkedin.png", "twitter.png", "instagram.png", "youtube.png",
-} | {f"image{str(i).zfill(3)}.{ext}"
-     for i in range(1, 20) for ext in ("png", "jpg", "jpeg", "gif")}
+# Universal rule: KEEP everything unless it is clearly a signature / logo / icon.
+# This is the opposite of the old HYDAC default (which rejected images unless they
+# proved useful) so that real drawings / datasheets / nameplate photos with messy
+# filenames (IMG_4821.jpg, Scan.pdf, photo.jpeg) are not dropped.
 
-VALID_ATTACHMENT_EXTENSIONS = {
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".webp"}
+
+# documents are always real evidence — never auto-rejected
+DOC_EXTENSIONS = {
     ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv",
     ".step", ".stp", ".igs", ".iges", ".dwg", ".dxf",
-    ".zip", ".rar", ".7z", ".png", ".jpg", ".jpeg", ".tif", ".tiff",
+    ".zip", ".rar", ".7z", ".txt",
 }
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff"}
 
+# obvious signature / logo / tracking-pixel image names → reject
+_SIGNATURE_NAME_RE = re.compile(
+    r"""^(
+        image\.(png|jpe?g|gif|tiff?|bmp)            # bare image.png
+      | image0*\d{1,3}\.(png|jpe?g|gif|tiff?|bmp)   # image001.png .. image0019.png
+      | outlook-[\w-]*\.(png|jpe?g|gif)             # Outlook-2sjln02o.png
+      | (logo|banner|header|footer|icon|spacer|divider|pixel)\b.*\.(png|jpe?g|gif|bmp)
+      | (facebook|linkedin|twitter|instagram|youtube|x|tiktok)\.(png|jpe?g|gif)
+    )$""",
+    re.I | re.X,
+)
+
+
+def decide_attachment(filename: str, attachment_obj=None) -> Dict:
+    """Keep unless the file is clearly a signature/logo/icon image."""
+    if not filename:
+        return {"filename": "", "decision": "Reject", "reason": "Blank filename"}
+    name = Path(filename).name
+    ext = Path(name).suffix.lower()
+
+    if ext in DOC_EXTENSIONS:
+        return {"filename": name, "decision": "Keep", "reason": "Document / drawing / datasheet", "obj": attachment_obj}
+
+    if ext in IMAGE_EXTENSIONS:
+        if _SIGNATURE_NAME_RE.match(name):
+            return {"filename": name, "decision": "Reject", "reason": "Signature/logo image", "obj": attachment_obj}
+        return {"filename": name, "decision": "Keep", "reason": "Image — likely customer evidence", "obj": attachment_obj}
+
+    # unknown extension: keep but mark, so the user can decide on the dashboard
+    return {"filename": name, "decision": "Keep", "reason": f"Other file ({ext or 'no ext'})", "obj": attachment_obj}
+
+
+# ── text cleanup ────────────────────────────────────────────────────────────────
 _ICON_PREFIX_RE = re.compile(
-    r"^\s*<https?://[^\s>]+?(?:/images?/|/img/|/cms/|/static/|/icons?/|/logo|/media/)[^\s>]*>\s*[\t ]*",
+    r"^\s*<https?://[^\s>]+?(?:/images?/|/img/|/cms/|/static/|/icons?/|/logo|/media/|imageserver)[^\s>]*>\s*[\t ]*",
     re.I,
 )
 
@@ -57,29 +88,6 @@ def html_to_text(html: str) -> str:
 
 def strip_icon_prefixes(text: str) -> str:
     return "\n".join(_ICON_PREFIX_RE.sub("", line) for line in text.splitlines())
-
-
-def decide_attachment(filename: str, attachment_obj=None) -> Dict:
-    if not filename:
-        return {"filename": "", "decision": "Reject", "reason": "Blank filename"}
-    name = Path(filename).name
-    low = name.lower()
-    ext = Path(low).suffix
-    if ext not in VALID_ATTACHMENT_EXTENSIONS:
-        return {"filename": name, "decision": "Reject", "reason": f"Unsupported {ext or '(none)'}"}
-    if low in SIGNATURE_IMAGE_NAMES:
-        return {"filename": name, "decision": "Reject", "reason": "Signature/logo image"}
-    if re.fullmatch(r"image[.](png|jpg|jpeg|gif|tif|tiff)", low):
-        return {"filename": name, "decision": "Reject", "reason": "Signature/logo image"}
-    if re.match(r"image[0-9]", low) and ext in IMAGE_EXTENSIONS:
-        return {"filename": name, "decision": "Keep", "reason": "Numbered inline image", "obj": attachment_obj}
-    if ext not in IMAGE_EXTENSIONS:
-        return {"filename": name, "decision": "Keep", "reason": "Document/CAD attachment", "obj": attachment_obj}
-    if re.search(r"[0-9]{4,}", name):
-        return {"filename": name, "decision": "Keep", "reason": "Part/model number in name", "obj": attachment_obj}
-    if re.search(r"(?i)(pump|filter|drawing|label|plate|model|part|hydraulic|spec|quote|serial|bieri)", name):
-        return {"filename": name, "decision": "Keep", "reason": "Product keyword in name", "obj": attachment_obj}
-    return {"filename": name, "decision": "Reject", "reason": "Image not customer evidence"}
 
 
 def parse_msg(file_bytes: bytes, fallback_name: str = "lead") -> Dict:
@@ -116,32 +124,49 @@ def parse_msg(file_bytes: bytes, fallback_name: str = "lead") -> Dict:
     }
 
 
-# ── AI agent ───────────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are the HYDAC Lead Agent. HYDAC is a US industrial filtration and hydraulics company.
-You receive raw forwarded email threads and extract the external customer lead.
-Identify the REAL external customer — the person who sent an inquiry TO HYDAC.
-Ignore HYDAC employees / forwarders (@hydacusa.com, @hydac.com, @hydac-interlynx.com).
-The customer is usually the OLDEST message or the one below an "EXTERNAL EMAIL" marker.
+# ── universal agent prompt ──────────────────────────────────────────────────────
+SYSTEM_PROMPT = """You are the Lead AI Agent. You read raw (often forwarded) sales email threads from
+ANY industry or company and extract the real sales LEAD.
 
-RULES:
-- FirstName / LastName: split cleanly, handle "Last, First", remove titles.
-- ContactTitle: job title from signature only.
-- Email: external customer email only, never a HYDAC domain.
-- Company: from body/signature; never infer from gmail/yahoo/hotmail. If only a business domain
-  is present (e.g. fleetpride.com) derive the name (FleetPride).
-- Address/City/State/ZipCode/Country: only what is written.
-- PhoneSupplied: customer phones only, formatted "phone1 : phone2".
-- WebAddress: explicit URLs only.
-- LeadComments: copy the customer's request VERBATIM (no paraphrase). For item tables use <br> and <b>labels</b>.
-  Remove only greetings, sign-offs, signature blocks, legal disclaimers.
-- Product: HYDAC model/part number or category.
-- Quantity: numeric only if stated.
-- Summary: 2-4 sentence briefing for a sales rep.
+WHO IS THE LEAD:
+The lead is the EXTERNAL party requesting something — a price, lead time, a part, a datasheet,
+compatibility info, a replacement, etc. They are the person who first wrote IN with the inquiry.
+
+WHO TO IGNORE (there is NO fixed company — work it out from THIS thread):
+- The VENDOR/supplier being asked for the quote: usually the top sender if they are REPLYING
+  ("you don't have an active account", "a distributor will contact you", "please find attached our offer"),
+  or whoever the inquiry was addressed TO.
+- Internal forwarders: people who merely forwarded the thread inside the vendor's company
+  (look for "Forwarded Message", "WG:", "FW:", "Im Auftrag von", multiple same-domain hops).
+- Anyone whose email domain matches the vendor's / forwarders' domain.
+Signals that mark the real customer's message: an "[EXTERNAL]" / "originated from outside" banner,
+a "Forwarded Message" divider, or simply being the original inquiry in a direct (non-forwarded) email.
+If the email is direct (not forwarded), the sender IS the lead.
+
+EXTRACTION RULES:
+- FirstName / LastName: split cleanly, handle "Last, First", remove titles (Mr/Dr).
+- ContactTitle: job title from the customer's signature only.
+- Email: the customer's own email. Never the vendor/forwarder address.
+- Company: from the customer's body/signature. If only a business email domain is present
+  (not gmail/yahoo/hotmail/outlook/icloud), derive the company from the domain (e.g. atcoflex.com -> Atcoflex).
+  Never use the vendor's company as the lead's company.
+- Address/City/State/ZipCode/Country: only what the customer wrote.
+- PhoneSupplied: the customer's phone(s) only, formatted "phone1 : phone2".
+- WebAddress: the customer's explicit URL only.
+- Product: the part number / model / product the customer is asking about, exactly as written.
+  Part numbers vary wildly by brand (e.g. UL-4030-CM+ULMB-40, M/50/EAP/10V, 801077700000,
+  CXK02-2/2-FC-3/50/004/200PP, R901239533, UB2522-3ZCM). Copy it verbatim; do not normalise.
+- Quantity: numeric only if the customer stated it.
+- LeadComments: the customer's request VERBATIM. Remove only greetings, sign-offs, signature block,
+  legal disclaimers, and tracking/forward boilerplate. For item tables use <br> and <b>labels</b>.
+- Summary: 2-4 sentence briefing for a sales rep (who the customer is, what they want, any context).
+- VendorContext: 1 short line naming the vendor/supplier this inquiry was sent to or about, if identifiable
+  (e.g. "Forwarded from Norgren/IMI customer service"). Empty if it was a direct email.
 
 Return ONLY valid JSON with these keys (unknown = ""):
 {"FirstName":"","LastName":"","ContactTitle":"","Email":"","Company":"","Address":"","City":"",
 "State":"","ZipCode":"","Country":"","PhoneSupplied":"","WebAddress":"","LeadComments":"",
-"Summary":"","Product":"","Quantity":"","AgentReason":""}
+"Summary":"","Product":"","Quantity":"","VendorContext":"","AgentReason":""}
 No markdown, no preamble."""
 
 PROVIDERS = ["groq", "gemini", "claude", "openai", "ollama"]

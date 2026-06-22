@@ -1,56 +1,43 @@
-# HYDAC Lead Formatter
+# Lead AI Agent
 
-A focused, standalone tool that turns lead records into the **HYDAC 54-column Excel format**.
-Split out from the HYDAC Lead Agent so the formatting + dashboard + merge tools live in their own repo.
+Universal lead extraction from Outlook `.msg` emails. The agent reads each (often
+forwarded) thread and pulls out the **real external customer** — for any company
+or industry — then lays the leads out on a dashboard for review.
 
-## What it does
+It is company-agnostic: there is **no hard-coded vendor and nothing to configure**.
+The agent works out per-email who the vendor/forwarder is (the party being asked for
+a quote, or the internal people who forwarded it) and who the actual lead is (the one
+requesting a price/part/info), using cues like an `[EXTERNAL]` banner, a forwarded-message
+divider, or a direct sender.
 
-The app has three tabs:
+## Stage 1 (this version)
+- Upload `.msg` files, one or many at once.
+- Extraction of name, title, email, company, address, phone, product, quantity, request and summary.
+- Dashboard: completeness metrics, editable grid, manual Lead Source 1/2/3, an
+  "how the agent read each email" panel (lead vs vendor), and a read-only preview of
+  each lead's kept attachments (image thumbnails + named documents).
+- Attachment filter keeps real drawings / datasheets / nameplate photos even with messy
+  filenames (`IMG_4821.jpg`, `Scan.pdf`), and rejects signature/logo/Outlook icons.
 
-### ➕ Add records
-- **Manual entry** — type one record at a time. Lead Source 1, 2 and 3 are manual fields.
-- **Bulk upload** — upload a CSV/Excel with one row per lead to format **10–20 records at once**.
-  - Download the built-in CSV template to get the column names.
-  - Column names are matched loosely, so `Lead Source 1`, `leadsource1` and `LEADSOURCE1` all land in the right place.
-  - Set default Lead Sources for the batch; they only fill rows where the file left them blank.
-- **.msg email extraction (optional)** — upload one or more Outlook `.msg` files and let an AI provider extract the lead. Needs an API key (see below). Everything else works without a key.
-
-### 📊 Dashboard
-- See **how your data extracts** at a glance: record count and how many rows have Email / Company / Phone / Product filled in.
-- Edit any cell inline — changes are kept automatically.
-- Set Lead Source 1/2/3 for **every record at once**.
-- Remove a single record or clear the batch.
-- **Download one Excel** containing all records in the full HYDAC header format.
-
-### 🗂️ Merge PDF / Images
-- Upload several PDFs and/or images.
-- Tick which ones to include and set their order.
-- Merge them into a **single PDF** and download it.
+## Stage 2 (next)
+- Per-lead: select which attachments are valid, then **confirm** (single) or **order + merge**
+  (two or more) into one **uniquely-named PDF**; the name goes into the `PDF` column.
+- Export a single **ZIP** containing `leads.xlsx` plus all the PDFs (you upload them to your FTP).
 
 ## Files
-
-- `app.py` — the Streamlit UI (three tabs)
-- `core.py` — the formatter engine: HYDAC header, row building, Excel export, CSV template, PDF/image merge (no API key needed)
-- `email_extract.py` — optional `.msg` parsing + AI extraction
+- `app.py` — Streamlit UI (upload → dashboard)
+- `email_extract.py` — `.msg` parsing, universal attachment filter, AI extraction prompt
+- `core.py` — Excel header/export and PDF/image helpers
 - `requirements.txt`, `runtime.txt`
 
 ## Deploy on Streamlit Cloud
-
-1. Push these files to a new GitHub repo.
-2. On [share.streamlit.io](https://share.streamlit.io) create an app:
-   - Main file path: `app.py`
-   - Branch: `main`
-3. (Optional) For `.msg` AI extraction, add a key in **Settings → Secrets**, e.g.:
-
-   ```toml
-   GROQ_API_KEY = "your_free_groq_key"
-   # or ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY
-   ```
-
-   Without a key the app still runs — only the `.msg` tab is disabled.
+1. Push to a new GitHub repo.
+2. Main file path `app.py`, branch `main`.
+3. Add a key in **Settings → Secrets**, e.g. `GROQ_API_KEY = "..."`
+   (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY`).
+   For Gemini also add `google-generativeai` to requirements.
 
 ## Run locally
-
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
