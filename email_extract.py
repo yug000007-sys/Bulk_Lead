@@ -90,6 +90,40 @@ def strip_icon_prefixes(text: str) -> str:
     return "\n".join(_ICON_PREFIX_RE.sub("", line) for line in text.splitlines())
 
 
+def format_received_datetime(value) -> str:
+    """Format an email date as 'M/D/YYYY h:MM AM/PM' (e.g. 6/19/2026 11:32 AM).
+
+    Accepts a datetime object or a string (RFC-2822 like
+    'Fri, 19 Jun 2026 16:13:03 +0000', or ISO). The wall-clock time is kept
+    as-is (no timezone conversion). Returns "" if it can't be parsed.
+    """
+    import datetime as _dt
+    from email.utils import parsedate_to_datetime
+
+    if not value:
+        return ""
+    dt = None
+    if isinstance(value, _dt.datetime):
+        dt = value
+    else:
+        s = str(value).strip()
+        try:
+            dt = parsedate_to_datetime(s)            # RFC-2822
+        except Exception:
+            for fmt in ("%Y-%m-%d %H:%M:%S%z", "%Y-%m-%d %H:%M:%S",
+                        "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S"):
+                try:
+                    dt = _dt.datetime.strptime(s, fmt)
+                    break
+                except Exception:
+                    continue
+    if dt is None:
+        return str(value)
+    hour12 = dt.hour % 12 or 12
+    ampm = "AM" if dt.hour < 12 else "PM"
+    return f"{dt.month}/{dt.day}/{dt.year} {hour12}:{dt.minute:02d} {ampm}"
+
+
 def parse_msg(file_bytes: bytes, fallback_name: str = "lead") -> Dict:
     """Parse a .msg file's bytes. Requires extract-msg (raises ImportError if missing)."""
     import extract_msg
@@ -99,7 +133,7 @@ def parse_msg(file_bytes: bytes, fallback_name: str = "lead") -> Dict:
     msg = extract_msg.Message(tmp_path)
     sender = msg.sender or ""
     subject = msg.subject or fallback_name
-    date = str(msg.date) if msg.date else ""
+    date = format_received_datetime(msg.date) if msg.date else ""
     body = clean_text(msg.body or "")
     if not body and getattr(msg, "htmlBody", None):
         body = html_to_text(msg.htmlBody)
@@ -157,9 +191,32 @@ EXTRACTION RULES:
   Part numbers vary wildly by brand (e.g. UL-4030-CM+ULMB-40, M/50/EAP/10V, 801077700000,
   CXK02-2/2-FC-3/50/004/200PP, R901239533, UB2522-3ZCM). Copy it verbatim; do not normalise.
 - Quantity: numeric only if the customer stated it.
-- LeadComments: the customer's request VERBATIM. Remove only greetings, sign-offs, signature block,
-  legal disclaimers, and tracking/forward boilerplate. For item tables use <br> and <b>labels</b>.
-- Summary: 2-4 sentence briefing for a sales rep (who the customer is, what they want, any context).
+- LeadComments: COPY THE CUSTOMER'S REQUEST WORD-FOR-WORD. This is a verbatim quote, NOT a summary.
+  Do NOT paraphrase, reword, rephrase, condense, expand, "clean up", or improve the wording in any way.
+  Changing the customer's words is an ERROR. Keep their exact sentences, spelling, capitalisation,
+  part numbers, vendor numbers, quantities, references and special instructions.
+  Remove ONLY: the greeting line (Hello/Hi/Dear/Good morning), the sign-off (Thanks/Regards/Best/Sincerely),
+  the signature block (name/title/company/contact lines), legal disclaimers, and forwarding/tracking boilerplate.
+  If the customer sent more than one message in the thread, use their substantive ORIGINAL request (the one
+  containing the actual ask), not a short follow-up like "any update on this?".
+  If details are laid out as a split/broken table (a label on one line and its value on a later line, e.g.
+  "Vendor #" / "Qty." then "3842543469" / "4"), reassemble them inline as "Label - value" pairs joined by
+  commas, keeping the exact words and numbers. Do not invent labels or values.
+  EXAMPLE — customer wrote:
+    "Hello,
+     May I please get pricing, MOQ and lead time on part below for Fastenal HTIN/IN067? I could not find
+     this part on the price file you sent me last week. Thanks.
+     Vendor #
+     Qty.
+     3842543469
+     4
+     Nick Hantle
+     Customer Supply Chain Administrator"
+  CORRECT LeadComments (verbatim, greeting+sign-off+signature removed, split table reassembled inline):
+    "May I please get pricing, MOQ and lead time on part below for Fastenal HTIN/IN067? I could not find this
+     part on the price file you sent me last week. Vendor # - 3842543469, Qty. - 4"
+- Summary: this is the ONLY place rewording/briefing belongs — 2-4 sentence briefing for a sales rep
+  (who the customer is, what they want, any context). Never put a summary or paraphrase in LeadComments.
 - VendorContext: 1 short line naming the vendor/supplier this inquiry was sent to or about, if identifiable
   (e.g. "Forwarded from Norgren/IMI customer service"). Empty if it was a direct email.
 
