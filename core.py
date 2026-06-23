@@ -224,11 +224,22 @@ def unique_pdf_name(company: str = "", date_str: str = "") -> str:
     """
     import time
     import uuid
+    stamp = None
     m = re.search(r"(\d{4})-(\d{2})-(\d{2})[\sT](\d{2}):(\d{2}):?(\d{2})?", date_str or "")
     if m:
         y, mo, d, h, mi, s = m.groups()
         stamp = f"{y}{mo}{d}_{h}{mi}{s or '00'}"
     else:
+        m2 = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2}):(\d{2})\s*([AaPp][Mm])?", date_str or "")
+        if m2:
+            mo, d, y, h, mi, ap = m2.groups()
+            h = int(h)
+            if ap and ap.lower() == "pm" and h != 12:
+                h += 12
+            if ap and ap.lower() == "am" and h == 12:
+                h = 0
+            stamp = f"{y}{int(mo):02d}{int(d):02d}_{h:02d}{mi}00"
+    if stamp is None:
         stamp = time.strftime("%Y%m%d_%H%M%S")
     while True:
         rand = uuid.uuid4().hex[:8]
@@ -267,3 +278,118 @@ def build_zip(rows: List[Dict], pdfs: Dict[str, bytes], excel_name: str = "leads
             if name and data:
                 z.writestr(name, data)
     return out.getvalue()
+
+
+# ── Comment → memo-style PDF (parts table) ──────────────────────────────────────
+
+_UM_SET = r"EA|PCS|PCS\.|PC|NOS|NO|SET|SETS|PR|PAIR|PAIRS|UNIT|UNITS|PKT|BOX|ROLL|M|MM|KG|L"
+_ROW_RE = re.compile(r"(\d{1,3})\s+(.+?)\s+(\d{1,4})\s+(" + _UM_SET + r")\b", re.I)
+_HEADER_RE = re.compile(r"sr\.?\s*no\.?\s+part\s*no\.?\s+description\s+qty\s+um", re.I)
+
+
+def _split_part_desc(blob: str):
+    """Split 'part no + description' into (part_no, description).
+    Part no = leading run of tokens made only of digits/hyphens; rest = description.
+    """
+    toks = blob.split()
+    part = []
+    i = 0
+    while i < len(toks) and re.fullmatch(r"[0-9][0-9\-]*", toks[i]):
+        part.append(toks[i])
+        i += 1
+    if not part and toks:                       # fallback: first token is the part no
+        part = [toks[0]]
+        i = 1
+    return " ".join(part), " ".join(toks[i:])
+
+
+def parse_parts_table(comment: str):
+    """Find a parts/BOM table inside a comment.
+    Returns (intro_text, rows) where rows = [(sr, part_no, description, qty, um), ...].
+    If fewer than 3 rows are detected, returns (comment, []).
+    """
+    matches = list(_ROW_RE.finditer(comment or ""))
+    if len(matches) < 3:
+        return comment, []
+    rows = []
+    for m in matches:
+        sr, blob, qty, um = m.group(1), m.group(2).strip(), m.group(3), m.group(4).upper()
+        part_no, desc = _split_part_desc(blob)
+        rows.append((sr, part_no, desc, qty, um))
+    intro = comment[:matches[0].start()].strip()
+    intro = _HEADER_RE.sub("", intro).strip()   # drop a trailing column header
+    return intro, rows
+
+
+def comment_to_pdf(comment: str, title: str = "Request for Quotation",
+                   reference: str = "") -> tuple | None:
+    """Render a comment (request text + parts table) as a clean memo-style PDF.
+    Returns (pdf_bytes, n_items, short_comment) or None on failure.
+    short_comment is the request text plus a '(N items — see attached PDF)' pointer.
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
+                                    TableStyle)
+
+    intro, rows = parse_parts_table(comment or "")
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=18 * mm, bottomMargin=18 * mm,
+                            leftMargin=16 * mm, rightMargin=16 * mm, title=title)
+    styles = getSampleStyleSheet()
+    h = ParagraphStyle("h", parent=styles["Title"], fontSize=15, spaceAfter=6, alignment=0)
+    sub = ParagraphStyle("sub", parent=styles["Normal"], fontSize=9,
+                         textColor=colors.HexColor("#666666"), spaceAfter=10)
+    body = ParagraphStyle("body", parent=styles["Normal"], fontSize=10, leading=14)
+    cell = ParagraphStyle("cell", parent=styles["Normal"], fontSize=8.5, leading=11)
+    cellb = ParagraphStyle("cellb", parent=cell, fontName="Helvetica-Bold")
+
+    story = [Paragraph(title, h)]
+    if reference:
+        story.append(Paragraph(reference, sub))
+    if intro:
+        bullets = [b.strip(" *\t") for b in re.split(r"\s*\*\s*|\u2022", intro) if b.strip(" *\t")]
+        lead_in = bullets.pop(0) if bullets else ""
+        if lead_in:
+            story.append(Paragraph(lead_in, body))
+        for b in bullets:
+            story.append(Paragraph("&bull;&nbsp;&nbsp;" + b, body))
+        story.append(Spacer(1, 8))
+
+    n_items = len(rows)
+    if rows:
+        header = [Paragraph(x, cellb) for x in ("Sr", "Part No", "Description", "Qty", "UM")]
+        data = [header] + [[Paragraph(sr, cell), Paragraph(pn, cell),
+                            Paragraph(desc, cell), Paragraph(qty, cell), Paragraph(um, cell)]
+                           for (sr, pn, desc, qty, um) in rows]
+        col_w = [12 * mm, 34 * mm, 90 * mm, 14 * mm, 14 * mm]
+        tbl = Table(data, colWidths=col_w, repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#999999")),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8E8E8")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ALIGN", (3, 0), (4, -1), "CENTER"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F6F6F6")]),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        story.append(tbl)
+
+    try:
+        doc.build(story)
+    except Exception:
+        return None
+
+    short = intro or (comment or "").strip()
+    if n_items:
+        short = (short + f"  ({n_items} items — see attached PDF)").strip()
+    return buf.getvalue(), n_items, short
+
+
+def combine_pdfs(parts: List[Tuple[str, bytes]]) -> bytes | None:
+    """Combine an ordered list of (filename, bytes) — PDFs and images — into one PDF.
+    The comment PDF is just the first item; images are wrapped, PDFs appended."""
+    return merge_to_pdf(parts)

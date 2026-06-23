@@ -27,6 +27,22 @@ st.title("🧲 Lead AI Agent")
 st.caption("Upload .msg emails — the agent finds the real customer lead in each thread, "
            "for any company or industry. Review everything on the dashboard.")
 
+
+def _render_pdf_made(rec, i):
+    """Download + undo controls shown once a lead's PDF has been built."""
+    done = rec["row"].get("PDF", "")
+    if not done:
+        return
+    cdl, ccl = st.columns([1, 1])
+    cdl.download_button("📄 Download this PDF", data=rec.get("pdf_bytes", b""),
+                        file_name=done, mime="application/pdf", key=f"dl_{i}")
+    if ccl.button("↩️ Undo this PDF", key=f"undo_{i}"):
+        rec["row"]["PDF"] = ""
+        rec.pop("pdf_bytes", None)
+        if "_orig_comment" in rec:          # restore the full comment if it was shortened
+            rec["row"]["LeadComments"] = rec.pop("_orig_comment")
+        st.rerun()
+
 # ── sidebar: AI provider + key ──────────────────────────────────────────────────
 with st.sidebar:
     st.header("Settings")
@@ -166,78 +182,101 @@ else:
                      use_container_width=True)
 
     # ── attachments: select → confirm (1) or order+merge (2+) → one PDF ─────────
-    if n_with_att:
-        st.markdown("#### 📎 Attachments → PDF")
-        st.caption("Tick the valid files for each lead. One file → Confirm (renamed to a unique PDF). "
-                   "Two or more → set order and Merge into one PDF. The name goes into the PDF column.")
-        for i, rec in enumerate(batch):
-            atts = rec["attachments"]
-            if not atts:
-                continue
+    # ── build one PDF per lead: comment parts-table memo + selected attachments ──
+    buildable = []
+    for i, rec in enumerate(batch):
+        _intro, _rows = core.parse_parts_table(rec["row"].get("LeadComments", ""))
+        rec["_table_rows"] = len(_rows)
+        pdfable = [(n, d) for n, d in rec["attachments"]
+                   if Path(n).suffix.lower() in core.MERGEABLE_EXTS]
+        rec["_pdfable"] = pdfable
+        if pdfable or len(_rows) >= 3:
+            buildable.append(i)
+
+    if buildable:
+        st.markdown("#### 🧷 Build PDF (per lead)")
+        st.caption("For leads with a long parts list and/or attachments. Make a memo PDF of the "
+                   "comment table, optionally append the attachments, and the unique name goes "
+                   "into the PDF column. The comment is shortened to the request text.")
+        for i in buildable:
+            rec = batch[i]
             label = rec["row"].get("Company") or rec["row"].get("LastName") or rec.get("source_file") or f"record {i}"
             done = rec["row"].get("PDF", "")
-            head = f"📎 [{i}] {label} — {len(atts)} attachment(s)" + (f"  ✅ {done}" if done else "")
+            n_tbl = rec["_table_rows"]
+            pdfable = rec["_pdfable"]
+            tag = []
+            if n_tbl >= 3:
+                tag.append(f"{n_tbl}-item table")
+            if pdfable:
+                tag.append(f"{len(pdfable)} attachment(s)")
+            head = f"🧷 [{i}] {label} — " + ", ".join(tag) + (f"  ✅ {done}" if done else "")
             with st.expander(head):
-                # thumbnails for quick validity check
-                images = [(n, d) for n, d in atts if Path(n).suffix.lower() in core.IMAGE_EXTS]
-                if images:
-                    cols = st.columns(min(4, len(images)))
-                    for j, (n, d) in enumerate(images):
-                        with cols[j % len(cols)]:
-                            try:
-                                st.image(d, caption=n, width=140)
-                            except Exception:
-                                st.caption(n)
+                make_table = False
+                if n_tbl >= 3:
+                    make_table = st.checkbox(f"Include parts table as memo page ({n_tbl} items)",
+                                             value=True, key=f"tbl_{i}")
 
-                # selection / ordering grid (only PDF + image files can become a PDF)
-                pdfable = [(n, d) for n, d in atts if Path(n).suffix.lower() in core.MERGEABLE_EXTS]
-                other = [(n, d) for n, d in atts if Path(n).suffix.lower() not in core.MERGEABLE_EXTS]
+                # attachment thumbnails + selection
+                items = []
+                if pdfable:
+                    images = [(n, d) for n, d in rec["attachments"] if Path(n).suffix.lower() in core.IMAGE_EXTS]
+                    if images:
+                        cols = st.columns(min(4, len(images)))
+                        for j, (n, d) in enumerate(images):
+                            with cols[j % len(cols)]:
+                                try:
+                                    st.image(d, caption=n, width=140)
+                                except Exception:
+                                    st.caption(n)
+                    sel_df = pd.DataFrame([{"include": True, "order": k + 1, "file": n}
+                                           for k, (n, _) in enumerate(pdfable)])
+                    sel = st.data_editor(
+                        sel_df, hide_index=True, use_container_width=True, key=f"sel_{i}",
+                        column_config={
+                            "include": st.column_config.CheckboxColumn("Use"),
+                            "order": st.column_config.NumberColumn("Order", min_value=1, step=1),
+                            "file": st.column_config.TextColumn("File", disabled=True),
+                        })
+                    chosen = sel[sel["include"] == True].sort_values("order")  # noqa: E712
+                    by_name = {n: d for n, d in pdfable}
+                    items = [(r["file"], by_name[r["file"]]) for _, r in chosen.iterrows()]
+
+                other = [n for n, _ in rec["attachments"] if Path(n).suffix.lower() not in core.MERGEABLE_EXTS]
                 if other:
-                    st.caption("Can't go into a PDF (kept in the email, not the merged file): "
-                               + ", ".join(n for n, _ in other))
+                    st.caption("Not added to the PDF (kept in the email): " + ", ".join(other))
 
-                if not pdfable:
-                    st.caption("No PDF/image attachments to turn into a PDF for this lead.")
-                    continue
-
-                sel_df = pd.DataFrame([{"include": True, "order": k + 1, "file": n}
-                                       for k, (n, _) in enumerate(pdfable)])
-                sel = st.data_editor(
-                    sel_df, hide_index=True, use_container_width=True, key=f"sel_{i}",
-                    column_config={
-                        "include": st.column_config.CheckboxColumn("Use"),
-                        "order": st.column_config.NumberColumn("Order", min_value=1, step=1),
-                        "file": st.column_config.TextColumn("File", disabled=True),
-                    })
-                chosen = sel[sel["include"] == True].sort_values("order")  # noqa: E712
-                by_name = {n: d for n, d in pdfable}
-                items = [(r["file"], by_name[r["file"]]) for _, r in chosen.iterrows()]
-
-                btn_label = "✅ Confirm (1 file → PDF)" if len(items) == 1 else f"🔗 Merge {len(items)} files → PDF"
-                if st.button(btn_label, key=f"make_{i}", disabled=len(items) == 0):
+                disabled = not (make_table or items)
+                if st.button("📄 Make / update PDF for this lead", key=f"make_{i}",
+                             disabled=disabled, type="primary"):
                     company = rec["row"].get("Company", "")
                     date_str = rec["row"].get("ReceivedDateTime", "")
-                    if len(items) == 1:
-                        pdf = core.single_to_pdf(items[0][0], items[0][1])
-                    else:
-                        pdf = core.merge_to_pdf(items)
+                    parts = []
+                    short_comment = None
+                    if make_table:
+                        ref = rec["row"].get("Product", "") or rec["row"].get("Subject", "")
+                        built = core.comment_to_pdf(rec["row"].get("LeadComments", ""),
+                                                    title="Request for Quotation", reference=ref)
+                        if built:
+                            memo_bytes, _n, short_comment = built
+                            parts.append(("comment.pdf", memo_bytes))
+                    parts.extend(items)
+                    pdf = core.combine_pdfs(parts) if len(parts) > 1 else (parts[0][1] if parts else None)
                     if pdf:
                         name = core.unique_pdf_name(company, date_str)
+                        rec.setdefault("_orig_comment", rec["row"].get("LeadComments", ""))
                         rec["row"]["PDF"] = name
                         rec["pdf_bytes"] = pdf
-                        st.success(f"Created **{name}** ({len(items)} file(s)). Added to the export package.")
+                        if short_comment is not None:
+                            rec["row"]["LeadComments"] = short_comment
+                        st.success(f"Created **{name}** "
+                                   f"({'memo' if make_table else ''}{' + ' if make_table and items else ''}"
+                                   f"{str(len(items)) + ' file(s)' if items else ''}).")
                         st.rerun()
                     else:
-                        st.error("Could not build a PDF from the selected file(s).")
+                        st.error("Nothing selected to build a PDF from.")
 
-                if done:
-                    cdl, ccl = st.columns([1, 1])
-                    cdl.download_button("📄 Download this PDF", data=rec.get("pdf_bytes", b""),
-                                        file_name=done, mime="application/pdf", key=f"dl_{i}")
-                    if ccl.button("↩️ Undo / redo selection", key=f"undo_{i}"):
-                        rec["row"]["PDF"] = ""
-                        rec.pop("pdf_bytes", None)
-                        st.rerun()
+                _render_pdf_made(rec, i)
+
 
     # ── export: Excel + all produced PDFs as one ZIP ────────────────────────────
     st.divider()
