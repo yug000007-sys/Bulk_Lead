@@ -391,7 +391,7 @@ def inline_images_to_pdf(inline_image_labels: list, request_text: str = "",
     import io as _io
     from PIL import Image as PILImage
 
-    if not inline_image_labels:
+    if not inline_image_labels and not request_text:
         return None
 
     buf = BytesIO()

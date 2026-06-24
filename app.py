@@ -131,6 +131,9 @@ if msg_files and ready and st.button("🔎 Extract & add to batch", type="primar
                 "vendor": fields.get("VendorContext", ""),
                 "reason": fields.get("AgentReason", ""),
                 "source_file": mf.name,
+                "raw_body": parsed.get("body", ""),
+                "raw_sender": parsed.get("sender", ""),
+                "raw_subject": parsed.get("subject", ""),
             })
             ok += 1
         except Exception as e:
@@ -245,6 +248,93 @@ else:
                 st.caption("Why: " + rec["reason"])
             if rec.get("vendor"):
                 st.caption("Vendor/forwarder: " + rec["vendor"])
+
+    # ── Raw email viewer: editable body + Make PDF from selection ────────────────
+    with st.expander("📧 View raw email / Make PDF from selection"):
+        st.caption("Select a lead to inspect its raw email. Edit the text area down to "
+                   "what you want, then click Make PDF — the result is merged with any "
+                   "images and written into the PDF column.")
+        raw_idx = st.selectbox("Lead", options=list(range(len(batch))),
+                               format_func=lambda i: (
+                                   f"#{i} — "
+                                   + (batch[i]["row"].get("Company")
+                                      or batch[i]["row"].get("LastName")
+                                      or batch[i].get("source_file", f"record {i}"))
+                               ), key="raw_sel")
+        rrec = batch[raw_idx]
+
+        # Header info
+        rc1, rc2, rc3 = st.columns(3)
+        rc1.markdown(f"**From:** {rrec.get('raw_sender', '—')}")
+        rc2.markdown(f"**Subject:** {rrec.get('raw_subject', '—')}")
+        rc3.markdown(f"**Date:** {rrec['row'].get('ReceivedDateTime', '—')}")
+
+        # Attachment decisions
+        decisions = rrec.get("decisions", [])
+        if decisions:
+            with st.expander(f"Attachments ({len(decisions)} found)", expanded=False):
+                for d in decisions:
+                    icon = "✅" if d.get("decision") == "Keep" else "❌"
+                    st.caption(f"{icon} **{d.get('filename','?')}** — {d.get('reason','')}")
+
+        # Editable body text
+        st.markdown("**Email body** — trim to the text you want in the PDF:")
+        edited_body = st.text_area(
+            "Email body",
+            value=rrec.get("raw_body", ""),
+            height=300,
+            key=f"raw_body_{raw_idx}",
+            label_visibility="collapsed",
+        )
+
+        # Make PDF from selection button
+        col_btn, col_info = st.columns([1, 3])
+        if col_btn.button("📄 Make PDF from this text", key=f"sel_pdf_{raw_idx}",
+                          type="primary"):
+            from pathlib import Path as _Path
+            inline = rrec.get("inline_image_labels", [])
+            file_items = [(n, d) for n, d in rrec.get("attachments", [])
+                          if _Path(n).suffix.lower() in core.MERGEABLE_EXTS]
+            parts = []
+            # Text memo first
+            if edited_body.strip():
+                built = core.comment_to_pdf(
+                    edited_body.strip(),
+                    title=rrec.get("raw_subject", "") or "Customer Request",
+                    reference=rrec["row"].get("Product", ""),
+                )
+                if built:
+                    parts.append(("memo.pdf", built[0]))
+                else:
+                    # comment_to_pdf returns None when no parts table found —
+                    # fall back to plain text memo via inline_images_to_pdf
+                    plain_pdf = core.inline_images_to_pdf(
+                        [], request_text=edited_body.strip(),
+                        title=rrec.get("raw_subject", "") or "Customer Request",
+                    )
+                    if plain_pdf:
+                        parts.append(("memo.pdf", plain_pdf))
+            # Then inline images
+            if inline:
+                img_pdf = core.inline_images_to_pdf(
+                    inline, request_text="",
+                    title=rrec.get("raw_subject", "") or "Customer Request",
+                )
+                if img_pdf:
+                    parts.append(("images.pdf", img_pdf))
+            # Then file attachments
+            parts.extend(file_items)
+
+            if parts:
+                pdf_bytes = core.combine_pdfs(parts) if len(parts) > 1 else parts[0][1]
+                if pdf_bytes:
+                    name = core.unique_pdf_name()
+                    rrec["row"]["PDF"] = name
+                    rrec["pdf_bytes"] = pdf_bytes
+                    col_info.success(f"✅ Created **{name}**")
+                    st.rerun()
+            else:
+                col_info.warning("Nothing to build — add some text or check attachments.")
 
     with st.expander("Show all 54 export columns"):
         st.dataframe(pd.DataFrame([rec["row"] for rec in batch])[core.EXCEL_HEADER],
