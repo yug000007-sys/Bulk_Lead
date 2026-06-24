@@ -66,6 +66,28 @@ with st.sidebar:
         api_key = api_key or st.text_input(f"{provider.title()} API Key", type="password")
         st.success("Key ready") if api_key else st.warning("Enter a key to enable extraction")
 
+    st.divider()
+    st.markdown("**Timezone (for email timestamps)**")
+    UTC_OFFSETS = {
+        "UTC+0  (London winter, GMT)": 0,
+        "UTC-4  (US Eastern — EDT, summer)": -4,
+        "UTC-5  (US Eastern — EST, winter / Central EDT)": -5,
+        "UTC-6  (US Central — CST / Mountain EDT)": -6,
+        "UTC-7  (US Mountain — MST / Pacific EDT)": -7,
+        "UTC-8  (US Pacific — PST)": -8,
+        "UTC+1  (Central Europe — CET)": 1,
+        "UTC+2  (Eastern Europe — EET / CEST)": 2,
+        "UTC+3  (Moscow / Gulf)": 3,
+        "UTC+5:30 (India — IST)": 5.5,
+        "UTC+8  (China / Singapore / Perth)": 8,
+        "UTC+9  (Japan / Korea)": 9,
+        "UTC+10 (Sydney AEST)": 10,
+    }
+    tz_label = st.selectbox("Your UTC offset", list(UTC_OFFSETS.keys()), index=1,
+                            help="Shifts email timestamps from UTC to your local time, "
+                                 "matching what Outlook displays.")
+    utc_offset = UTC_OFFSETS[tz_label]
+
 ready = (provider == "ollama") or bool(api_key)
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -93,7 +115,7 @@ if msg_files and ready and st.button("🔎 Extract & add to batch", type="primar
     ok = 0
     for i, mf in enumerate(msg_files, 1):
         try:
-            parsed = ee.parse_msg(mf.getvalue(), Path(mf.name).stem)
+            parsed = ee.parse_msg(mf.getvalue(), Path(mf.name).stem, utc_offset_hours=utc_offset)
             fields = ee.run_agent(parsed["full_text"], provider, api_key)
             fields["ReceivedDateTime"] = parsed["date"]
             fields["LeadSource1"] = ls1

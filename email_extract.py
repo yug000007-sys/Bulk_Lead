@@ -90,12 +90,18 @@ def strip_icon_prefixes(text: str) -> str:
     return "\n".join(_ICON_PREFIX_RE.sub("", line) for line in text.splitlines())
 
 
-def format_received_datetime(value) -> str:
+def format_received_datetime(value, utc_offset_hours: float = 0.0) -> str:
     """Format an email date as 'M/D/YYYY h:MM AM/PM' (e.g. 6/19/2026 11:32 AM).
 
     Accepts a datetime object or a string (RFC-2822 like
-    'Fri, 19 Jun 2026 16:13:03 +0000', or ISO). The wall-clock time is kept
-    as-is (no timezone conversion). Returns "" if it can't be parsed.
+    'Fri, 19 Jun 2026 16:13:03 +0000', or ISO).
+
+    utc_offset_hours: the recipient's UTC offset, e.g. -4 for US Eastern (EDT),
+    -5 for US Eastern (EST), -6 for Central, etc. Timezone-aware datetimes
+    (which extract_msg returns as UTC) are shifted by this offset before
+    formatting, so the result matches what Outlook displays.
+    Naive datetimes (no tzinfo) are formatted as-is.
+    Returns "" if it can't be parsed.
     """
     import datetime as _dt
     from email.utils import parsedate_to_datetime
@@ -119,13 +125,23 @@ def format_received_datetime(value) -> str:
                     continue
     if dt is None:
         return str(value)
+    # Shift tz-aware datetimes (extract_msg gives UTC) to the user's local time.
+    if dt.tzinfo is not None:
+        tz = _dt.timezone(_dt.timedelta(hours=utc_offset_hours))
+        dt = dt.astimezone(tz).replace(tzinfo=None)
     hour12 = dt.hour % 12 or 12
     ampm = "AM" if dt.hour < 12 else "PM"
     return f"{dt.month}/{dt.day}/{dt.year} {hour12}:{dt.minute:02d} {ampm}"
 
 
-def parse_msg(file_bytes: bytes, fallback_name: str = "lead") -> Dict:
-    """Parse a .msg file's bytes. Requires extract-msg (raises ImportError if missing)."""
+def parse_msg(file_bytes: bytes, fallback_name: str = "lead",
+             utc_offset_hours: float = 0.0) -> Dict:
+    """Parse a .msg file's bytes. Requires extract-msg (raises ImportError if missing).
+
+    utc_offset_hours: your local UTC offset (e.g. -4 for US Eastern/EDT, -5 for EST,
+    -6 for Central). MSG files store dates in UTC; this shifts them to local time so
+    ReceivedDateTime matches what Outlook displays.
+    """
     import extract_msg
     with tempfile.NamedTemporaryFile(delete=False, suffix=".msg") as tmp:
         tmp.write(file_bytes)
@@ -133,7 +149,7 @@ def parse_msg(file_bytes: bytes, fallback_name: str = "lead") -> Dict:
     msg = extract_msg.Message(tmp_path)
     sender = msg.sender or ""
     subject = msg.subject or fallback_name
-    date = format_received_datetime(msg.date) if msg.date else ""
+    date = format_received_datetime(msg.date, utc_offset_hours) if msg.date else ""
     body = clean_text(msg.body or "")
     if not body and getattr(msg, "htmlBody", None):
         body = html_to_text(msg.htmlBody)
