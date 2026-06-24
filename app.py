@@ -131,7 +131,7 @@ if msg_files and ready and st.button("🔎 Extract & add to batch", type="primar
                 "vendor": fields.get("VendorContext", ""),
                 "reason": fields.get("AgentReason", ""),
                 "source_file": mf.name,
-                "raw_body": parsed.get("body", ""),
+                "raw_body": parsed.get("display_body", parsed.get("body", "")),
                 "raw_sender": parsed.get("sender", ""),
                 "raw_subject": parsed.get("subject", ""),
             })
@@ -278,7 +278,8 @@ else:
                     st.caption(f"{icon} **{d.get('filename','?')}** — {d.get('reason','')}")
 
         # Editable body text
-        st.markdown("**Email body** — trim to the text you want in the PDF:")
+        st.markdown("**Email body** — inline images shown as `[📷 filename]` placeholders. "
+                    "Trim to the text you want in the PDF:")
         edited_body = st.text_area(
             "Email body",
             value=rrec.get("raw_body", ""),

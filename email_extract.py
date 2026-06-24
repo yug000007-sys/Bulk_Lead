@@ -96,6 +96,47 @@ def html_to_text(html: str) -> str:
     return clean_text(BeautifulSoup(html, "html.parser").get_text("\n"))
 
 
+def html_to_display_text(html: str, attachment_decisions: list = None) -> str:
+    """Convert HTML body to readable text, replacing inline images with
+    visible placeholders like [📷 image001.jpg] so the raw viewer shows
+    exactly what was in the email including attachment positions.
+    """
+    if not html:
+        return ""
+    # Build a name->decision map for richer placeholders
+    dec_map = {}
+    for d in (attachment_decisions or []):
+        fname = d.get("filename", "")
+        if fname:
+            dec_map[fname.lower()] = d.get("decision", "")
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Replace <img> tags with text placeholders before extracting text
+    for img in soup.find_all("img"):
+        src = img.get("src", "")
+        alt = img.get("alt", "")
+        if src.lower().startswith("cid:"):
+            cid = src[4:].split("@")[0]   # strip @01DCFD6E... part
+            decision = dec_map.get(cid.lower(), "")
+            icon = "📷" if decision == "Keep" else "🖼️"
+            placeholder = f"\n[{icon} {cid}]\n"
+        elif alt:
+            placeholder = f"[image: {alt}]"
+        else:
+            placeholder = "[image]"
+        img.replace_with(placeholder)
+
+    # Replace <br> and block elements with newlines
+    for tag in soup.find_all(["br", "p", "div", "tr"]):
+        tag.insert_before("\n")
+
+    text = soup.get_text(" ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def strip_icon_prefixes(text: str) -> str:
     return "\n".join(_ICON_PREFIX_RE.sub("", line) for line in text.splitlines())
 
@@ -277,9 +318,18 @@ def parse_msg(file_bytes: bytes, fallback_name: str = "lead",
         kept,
     )
 
+    # Build rich display body: HTML with inline image placeholders visible,
+    # falling back to plain text body. This is what the raw viewer shows.
+    html_body = getattr(msg, "htmlBody", None) or ""
+    if html_body:
+        display_body = html_to_display_text(html_body, decisions)
+    else:
+        display_body = body  # plain text fallback
+
     return {
         "sender": sender, "subject": subject, "date": date,
         "body": body, "full_text": full_text,
+        "display_body": display_body,
         "attachment_decisions": decisions, "kept_attachments": kept,
         "inline_image_labels": inline_labels,
     }
