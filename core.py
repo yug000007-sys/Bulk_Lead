@@ -246,18 +246,25 @@ def single_to_pdf(filename: str, data: bytes) -> bytes | None:
     return None
 
 
+def _is_valid_pdf(data: bytes) -> bool:
+    """Return True only if data starts with the PDF magic bytes."""
+    return bool(data) and data[:4] == b"%PDF"
+
+
 def build_zip(rows: List[Dict], pdfs: Dict[str, bytes], excel_name: str = "leads.xlsx") -> bytes:
     """Bundle the Excel plus every produced PDF into one ZIP.
 
     rows  : list of full 54-key rows (already carrying their PDF column names)
     pdfs  : mapping of {pdf_filename: pdf_bytes} to include alongside the Excel
+    Only valid PDF bytes (starting with %PDF) are included; invalid entries are
+    skipped so the ZIP is never silently corrupted.
     """
     import zipfile
     out = BytesIO()
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr(excel_name, make_excel(rows))
         for name, data in pdfs.items():
-            if name and data:
+            if name and data and _is_valid_pdf(data):
                 z.writestr(name, data)
     return out.getvalue()
 

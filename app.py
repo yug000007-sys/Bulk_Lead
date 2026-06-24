@@ -326,7 +326,7 @@ else:
             parts.extend(file_items)
 
             if parts:
-                pdf_bytes = core.combine_pdfs(parts) if len(parts) > 1 else parts[0][1]
+                pdf_bytes = core.combine_pdfs(parts) if parts else None
                 if pdf_bytes:
                     name = core.unique_pdf_name()
                     rrec["row"]["PDF"] = name
@@ -419,7 +419,7 @@ else:
                             memo_bytes, _n, short_comment = built
                             parts.append(("comment.pdf", memo_bytes))
                     parts.extend(items)
-                    pdf = core.combine_pdfs(parts) if len(parts) > 1 else (parts[0][1] if parts else None)
+                    pdf = core.combine_pdfs(parts) if parts else None
                     if pdf:
                         name = core.unique_pdf_name(company, date_str)
                         rec.setdefault("_orig_comment", rec["row"].get("LeadComments", ""))
