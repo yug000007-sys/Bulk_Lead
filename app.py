@@ -127,6 +127,7 @@ if msg_files and ready and st.button("🔎 Extract & add to batch", type="primar
                 "row": core.coerce_row(fields),
                 "attachments": parsed.get("kept_attachments", []),
                 "decisions": parsed.get("attachment_decisions", []),
+                "inline_image_labels": parsed.get("inline_image_labels", []),
                 "vendor": fields.get("VendorContext", ""),
                 "reason": fields.get("AgentReason", ""),
                 "source_file": mf.name,
@@ -186,6 +187,52 @@ else:
     for i, rec in enumerate(batch):
         for c in core.PRIMARY_COLS:
             rec["row"][c] = "" if pd.isna(edited.iloc[i][c]) else str(edited.iloc[i][c])
+
+    # ── One-click Make PDF per lead ─────────────────────────────────────────────
+    st.markdown("#### ⚡ Quick Make PDF")
+    st.caption("One click per lead — builds PDF from inline images and/or request text. "
+               "PDF name is written into the PDF column and included in the export ZIP.")
+    qcols = st.columns(min(4, len(batch)))
+    for i, rec in enumerate(batch):
+        col = qcols[i % len(qcols)]
+        label = (rec["row"].get("Company") or rec["row"].get("LastName")
+                 or rec.get("source_file") or f"#{i}")
+        done = rec["row"].get("PDF", "")
+        btn_label = f"✅ #{i} {label[:18]}" if done else f"📄 #{i} {label[:18]}"
+        if col.button(btn_label, key=f"qmake_{i}", help=done or "Build PDF for this lead"):
+            inline = rec.get("inline_image_labels", [])
+            request_text = rec["row"].get("LeadComments", "")
+            # Also include file attachments that are images/PDFs
+            from pathlib import Path as _Path
+            file_items = [(n, d) for n, d in rec.get("attachments", [])
+                          if _Path(n).suffix.lower() in core.MERGEABLE_EXTS]
+            pdf_bytes = None
+            if inline:
+                # Inline images path — memo style with labels
+                pdf_bytes = core.inline_images_to_pdf(
+                    inline, request_text=request_text,
+                    title=rec["row"].get("Subject", "Customer Request") or "Customer Request"
+                )
+            elif file_items:
+                # File attachments path — existing merge logic
+                pdf_bytes = core.combine_pdfs(file_items)
+            elif request_text:
+                # Text-only — parts table / comment memo
+                built = core.comment_to_pdf(request_text,
+                                            title="Request for Quotation",
+                                            reference=rec["row"].get("Product", ""))
+                if built:
+                    pdf_bytes = built[0]
+            if pdf_bytes:
+                name = core.unique_pdf_name()
+                rec["row"]["PDF"] = name
+                rec["pdf_bytes"] = pdf_bytes
+                st.success(f"PDF created: **{name}**")
+                st.rerun()
+            else:
+                st.warning(f"Nothing to build for lead #{i}.")
+
+    st.divider()
 
     # how the agent read each thread (lead vs vendor) — helps verify universal logic
     with st.expander("🤖 How the agent read each email"):

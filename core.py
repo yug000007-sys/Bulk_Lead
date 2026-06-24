@@ -216,34 +216,16 @@ _ISSUED_NAMES: set = set()
 
 
 def unique_pdf_name(company: str = "", date_str: str = "") -> str:
-    """Collision-proof PDF name: lead_<slug>_<YYYYMMDD>_<HHMMSS>_<rand>.pdf
+    """Collision-proof short PDF name: lead_<rand12>.pdf
 
-    Uses a timestamp plus a random suffix, and also remembers every name handed
-    out this session, regenerating on the rare clash — so no two files ever
-    share a name, even within the same second or across repeated batches.
+    Uses a 12-character random hex string — guaranteed unique within the
+    session and short enough to be practical. company/date_str are accepted
+    for API compatibility but no longer used in the filename.
     """
-    import time
     import uuid
-    stamp = None
-    m = re.search(r"(\d{4})-(\d{2})-(\d{2})[\sT](\d{2}):(\d{2}):?(\d{2})?", date_str or "")
-    if m:
-        y, mo, d, h, mi, s = m.groups()
-        stamp = f"{y}{mo}{d}_{h}{mi}{s or '00'}"
-    else:
-        m2 = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2}):(\d{2})\s*([AaPp][Mm])?", date_str or "")
-        if m2:
-            mo, d, y, h, mi, ap = m2.groups()
-            h = int(h)
-            if ap and ap.lower() == "pm" and h != 12:
-                h += 12
-            if ap and ap.lower() == "am" and h == 12:
-                h = 0
-            stamp = f"{y}{int(mo):02d}{int(d):02d}_{h:02d}{mi}00"
-    if stamp is None:
-        stamp = time.strftime("%Y%m%d_%H%M%S")
     while True:
-        rand = uuid.uuid4().hex[:8]
-        name = f"lead_{_slug(company)}_{stamp}_{rand}.pdf"
+        rand = uuid.uuid4().hex[:12]
+        name = f"lead_{rand}.pdf"
         if name not in _ISSUED_NAMES:
             _ISSUED_NAMES.add(name)
             return name
@@ -387,6 +369,102 @@ def comment_to_pdf(comment: str, title: str = "Request for Quotation",
     if n_items:
         short = (short + f"  ({n_items} items — see attached PDF)").strip()
     return buf.getvalue(), n_items, short
+
+
+def inline_images_to_pdf(inline_image_labels: list, request_text: str = "",
+                         title: str = "Customer Request") -> bytes | None:
+    """Build a memo-style PDF from inline email images with their labels.
+
+    Each image gets its own page with its label text printed above it.
+    A final text-only page carries the customer's request text (if any).
+    Returns PDF bytes or None on failure.
+
+    inline_image_labels: list of (image_bytes, label_text) in document order.
+    request_text: the customer's verbatim request (LeadComments).
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                    Image as RLImage, PageBreak)
+    import io as _io
+    from PIL import Image as PILImage
+
+    if not inline_image_labels:
+        return None
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+                            topMargin=15*mm, bottomMargin=15*mm,
+                            leftMargin=16*mm, rightMargin=16*mm,
+                            title=title)
+    styles = getSampleStyleSheet()
+    h_style = ParagraphStyle("h", parent=styles["Title"], fontSize=14,
+                              spaceAfter=4, alignment=0)
+    label_style = ParagraphStyle("lbl", parent=styles["Normal"], fontSize=10,
+                                 textColor=colors.HexColor("#1a4f8a"),
+                                 spaceAfter=6, leading=14)
+    body_style = ParagraphStyle("body", parent=styles["Normal"], fontSize=10,
+                                leading=14, spaceAfter=4)
+
+    # Page width available for images
+    page_w = A4[0] - 32*mm
+    page_h = A4[1] - 40*mm   # leave room for label + margins
+
+    story = []
+    story.append(Paragraph(title, h_style))
+    story.append(Spacer(1, 4*mm))
+
+    for idx, (img_bytes, label) in enumerate(inline_image_labels):
+        if not img_bytes:
+            continue
+        # Label text above image
+        if label:
+            # Clean up label — remove excessive whitespace, keep meaningful tokens
+            clean_label = " ".join(label.split())
+            story.append(Paragraph(clean_label, label_style))
+
+        # Convert image, fit within page
+        try:
+            pil_img = PILImage.open(_io.BytesIO(img_bytes))
+            if pil_img.mode in ("RGBA", "P", "LA"):
+                pil_img = pil_img.convert("RGB")
+            elif pil_img.mode != "RGB":
+                pil_img = pil_img.convert("RGB")
+            orig_w, orig_h = pil_img.size
+            # Scale to fit page width; cap height too
+            scale = min(page_w / orig_w, page_h / orig_h, 1.0)
+            draw_w = orig_w * scale
+            draw_h = orig_h * scale
+            img_buf = _io.BytesIO()
+            pil_img.save(img_buf, format="JPEG", quality=85)
+            img_buf.seek(0)
+            story.append(RLImage(img_buf, width=draw_w, height=draw_h))
+        except Exception:
+            story.append(Paragraph(f"[image {idx+1} could not be rendered]", body_style))
+
+        story.append(PageBreak())
+
+    # Final page: customer request text
+    if request_text and request_text.strip():
+        story.append(Paragraph("Customer Request", h_style))
+        story.append(Spacer(1, 4*mm))
+        for line in request_text.strip().splitlines():
+            line = line.strip()
+            if line:
+                story.append(Paragraph(line, body_style))
+
+    # Remove trailing PageBreak if last item is one
+    while story and isinstance(story[-1], PageBreak):
+        story.pop()
+
+    try:
+        doc.build(story)
+    except Exception:
+        return None
+
+    return buf.getvalue()
 
 
 def combine_pdfs(parts: List[Tuple[str, bytes]]) -> bytes | None:

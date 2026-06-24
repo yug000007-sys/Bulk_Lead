@@ -44,8 +44,14 @@ _SIGNATURE_NAME_RE = re.compile(
 )
 
 
-def decide_attachment(filename: str, attachment_obj=None) -> Dict:
-    """Keep unless the file is clearly a signature/logo/icon image."""
+def decide_attachment(filename: str, attachment_obj=None, data_size: int = 0) -> Dict:
+    """Keep unless the file is clearly a signature/logo/icon image.
+
+    data_size: byte length of the attachment data. Inline customer photos
+    (image001.jpg etc.) are large (>15 KB); real signature/logo images are
+    always tiny. If the name matches the signature pattern but the data is
+    large, we keep it as a customer photo.
+    """
     if not filename:
         return {"filename": "", "decision": "Reject", "reason": "Blank filename"}
     name = Path(filename).name
@@ -56,6 +62,10 @@ def decide_attachment(filename: str, attachment_obj=None) -> Dict:
 
     if ext in IMAGE_EXTENSIONS:
         if _SIGNATURE_NAME_RE.match(name):
+            # Override: large images (>15 KB) are customer photos, not logos
+            if data_size >= 15_000:
+                return {"filename": name, "decision": "Keep",
+                        "reason": "Inline customer photo (large image)", "obj": attachment_obj}
             return {"filename": name, "decision": "Reject", "reason": "Signature/logo image", "obj": attachment_obj}
         return {"filename": name, "decision": "Keep", "reason": "Image — likely customer evidence", "obj": attachment_obj}
 
@@ -134,6 +144,94 @@ def format_received_datetime(value, utc_offset_hours: float = 0.0) -> str:
     return f"{dt.month}/{dt.day}/{dt.year} {hour12}:{dt.minute:02d} {ampm}"
 
 
+def _extract_inline_labels(html_body: str, kept_attachments: list) -> list:
+    """Return a list of (image_bytes, label_text) in document order.
+
+    Parses the HTML body for <img> tags with cid: src. The text content
+    between consecutive images (or before the first / after the last) is
+    used as the label for the preceding image. Falls back to filename order
+    when HTML is unavailable or CIDs cannot be matched.
+    """
+    if not kept_attachments:
+        return []
+
+    # Only process kept images
+    image_attachments = [
+        (name, data) for name, data in kept_attachments
+        if Path(name).suffix.lower() in IMAGE_EXTENSIONS
+    ]
+    if not image_attachments:
+        return []
+
+    if not html_body:
+        # No HTML — return images with empty labels
+        return [(data, "") for _, data in image_attachments]
+
+    try:
+        soup = BeautifulSoup(html_body, "html.parser")
+
+        # Build cid -> filename map from kept attachments
+        # CIDs in HTML look like: cid:image001.jpg@01DCFD6E.163404D0
+        # attachment Content-ID property stored as e.g. image001.jpg@...
+        cid_map = {}
+        for name, data in image_attachments:
+            stem = Path(name).stem.lower()         # "image001"
+            base = Path(name).name.lower()         # "image001.jpg"
+            cid_map[stem] = (name, data)
+            cid_map[base] = (name, data)
+
+        # Walk body collecting text nodes and img tags in order
+        segments = []   # list of ("text", str) or ("img", name, data)
+        for el in soup.body.descendants if soup.body else soup.descendants:
+            if el.name == "img":
+                src = el.get("src", "")
+                if src.lower().startswith("cid:"):
+                    cid = src[4:].split("@")[0].lower()
+                    match = cid_map.get(cid) or cid_map.get(Path(cid).stem)
+                    if match:
+                        segments.append(("img", match[0], match[1]))
+            elif el.name is None:  # NavigableString
+                t = el.strip()
+                if t:
+                    segments.append(("text", t))
+
+        if not any(s[0] == "img" for s in segments):
+            # CID matching failed — fall back to order-based pairing
+            # Gather all text from body, split around blank lines as labels
+            all_text = clean_text(soup.get_text("\n"))
+            lines = [l.strip() for l in all_text.splitlines() if l.strip()]
+            # Distribute lines evenly as labels
+            n = len(image_attachments)
+            chunk = max(1, len(lines) // n) if lines else 1
+            result = []
+            for i, (name, data) in enumerate(image_attachments):
+                label = " ".join(lines[i*chunk:(i+1)*chunk])
+                result.append((data, label))
+            return result
+
+        # Pair each image with the text that immediately precedes it,
+        # appending any trailing text to the last image.
+        result = []
+        pending_text = []
+        for seg in segments:
+            if seg[0] == "text":
+                pending_text.append(seg[1])
+            elif seg[0] == "img":
+                label = " ".join(pending_text).strip()
+                result.append((seg[2], label))
+                pending_text = []
+        # Append trailing text to the last image
+        if result and pending_text:
+            last_data, last_label = result[-1]
+            extra = " ".join(pending_text).strip()
+            result[-1] = (last_data, (last_label + " " + extra).strip())
+
+        return result
+
+    except Exception:
+        return [(data, "") for _, data in image_attachments]
+
+
 def parse_msg(file_bytes: bytes, fallback_name: str = "lead",
              utc_offset_hours: float = 0.0) -> Dict:
     """Parse a .msg file's bytes. Requires extract-msg (raises ImportError if missing).
@@ -160,17 +258,30 @@ def parse_msg(file_bytes: bytes, fallback_name: str = "lead",
     for att in msg.attachments:
         fname = getattr(att, "longFilename", None) or getattr(att, "shortFilename", None) or ""
         if fname:
-            d = decide_attachment(fname, att)
+            try:
+                att_data = att.data or b""
+            except Exception:
+                att_data = b""
+            d = decide_attachment(fname, att, data_size=len(att_data))
             decisions.append(d)
             if d["decision"] == "Keep":
                 try:
-                    kept.append((d["filename"], att.data))
+                    kept.append((d["filename"], att_data))
                 except Exception:
                     pass
+
+    # Extract inline image labels: parse HTML body to pair each cid: image
+    # with the text that surrounds it (part numbers, labels, request text).
+    inline_labels = _extract_inline_labels(
+        getattr(msg, "htmlBody", None) or "",
+        kept,
+    )
+
     return {
         "sender": sender, "subject": subject, "date": date,
         "body": body, "full_text": full_text,
         "attachment_decisions": decisions, "kept_attachments": kept,
+        "inline_image_labels": inline_labels,
     }
 
 
