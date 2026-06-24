@@ -6,3 +6,4 @@ pypdf
 beautifulsoup4
 extract-msg
 openai
+reportlab
