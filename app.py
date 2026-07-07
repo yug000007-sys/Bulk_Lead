@@ -146,7 +146,13 @@ st.divider()
 # ════════════════════════════════════════════════════════════════════════════════
 # 2) DASHBOARD
 # ════════════════════════════════════════════════════════════════════════════════
-st.subheader("2. Dashboard")
+dash_col, clear_col = st.columns([6, 1])
+dash_col.subheader("2. Dashboard")
+if clear_col.button("🗑️ Clear All", type="secondary", use_container_width=True,
+                    help="Remove all uploaded leads and start fresh"):
+    st.session_state.batch = []
+    st.rerun()
+
 batch = st.session_state.batch
 
 if not batch:
